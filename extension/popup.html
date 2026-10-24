@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>B 站推广识别</title>
+    <link rel="stylesheet" href="popup.css">
+    <script src="popup.js" type="module"></script>
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div class="brand-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M12 3 4.5 6v5.2c0 4.4 2.8 7.8 7.5 9.8 4.7-2 7.5-5.4 7.5-9.8V6L12 3Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+            <path d="m8.4 12 2.3 2.3 4.9-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="brand-copy">
+          <h1>推广识别</h1>
+          <p>BILIBILI <span aria-hidden="true">/</span> 当前页面</p>
+        </div>
+        <span id="count-badge" class="count-badge" aria-label="待处理人数">0 位待处理</span>
+      </header>
+
+      <div id="account" class="account" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="account-text" class="account-text">正在检查登录状态…</span>
+        <a id="login-link" href="https://www.bilibili.com/" target="_blank" rel="noopener noreferrer" hidden>去登录</a>
+        <button id="refresh-account" class="text-button" type="button" title="重新检查 B 站登录状态">刷新</button>
+      </div>
+
+      <div id="notice" class="notice" role="status" hidden>
+        <span id="notice-text"></span>
+        <button id="dismiss-notice" type="button" aria-label="关闭提示">×</button>
+      </div>
+
+      <section id="queue" class="queue" aria-label="拉黑任务进度" hidden>
+        <div class="queue-heading"><strong id="queue-title"></strong><span id="queue-count"></span></div>
+        <progress id="queue-progress" max="1" value="0" aria-label="拉黑进度"></progress>
+        <p id="queue-detail"></p>
+        <div id="queue-actions" class="queue-actions" hidden>
+          <button id="resume-queue" type="button" class="small-button">继续任务</button>
+          <button id="cancel-queue" type="button" class="text-button">取消剩余任务</button>
+        </div>
+      </section>
+
+      <main id="main" class="main" aria-busy="true">
+        <div id="empty-state" class="empty-state">
+          <div class="empty-icon" aria-hidden="true">
+            <svg viewBox="0 0 48 48" fill="none">
+              <rect x="9" y="12" width="30" height="25" rx="6" stroke="currentColor" stroke-width="2"/>
+              <path d="m17 7 4 5m10-5-4 5M18 22v3m12-3v3m-11 6h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <h2 id="empty-title">正在读取页面</h2>
+          <p id="empty-description">稍等一下，正在整理推广名单。</p>
+        </div>
+        <div id="list-heading" class="list-heading" hidden><span>识别到的 UP 主</span><span id="list-meta"></span></div>
+        <div id="candidates" class="candidates"></div>
+      </main>
+
+      <footer class="footer">
+        <button id="block-all" class="primary-button" type="button" disabled>一键拉黑全部（0）</button>
+        <p id="footer-note">点击后加入 B 站账号黑名单</p>
+      </footer>
+    </div>
+  </body>
+</html>
