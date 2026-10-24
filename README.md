@@ -14,7 +14,7 @@ The documentation is in English. The extension popup currently uses Chinese text
 - Keeps a separate list for each tab's current page. Scrolling and refreshing recommendations add entries; reloading the page or navigating to another page starts a new list.
 - Automatically opens the toolbar popup when the active Bilibili tab discovers new uploaders and updates its count badge. Nearby discoveries are grouped, automatic openings are at least 10 seconds apart, and the same list does not repeatedly reopen the popup.
 - Processes a batch sequentially, with at least one second between submissions. A batch is a snapshot of eligible entries when you click **Block all**; later discoveries are not added automatically.
-- Continues an explicitly submitted batch when the popup closes or the page changes. Progress is stored for the browser session. After the background worker restarts, it checks in-progress relationships before continuing to avoid duplicate submissions.
+- Continues an explicitly submitted batch when the popup closes or the page changes, provided an eligible `www.bilibili.com` tab remains open. Progress is stored for the browser session. After the background worker restarts, it checks in-progress relationships before continuing to avoid duplicate submissions.
 
 The extension only identifies explicit promotion signals. It does not analyze audio or video, infer sponsorship from titles, or hide videos locally. Bilibili controls recommendation behavior after an account is blacklisted.
 
@@ -40,6 +40,8 @@ After updating the source or replacing files in the extracted directory, reload 
 ## Sign-in, progress, and failures
 
 - Detection works while signed out. Blocking requires a Bilibili session in the same Chrome profile. The extension reuses that session without asking for your password or persisting login cookies or CSRF values.
+- Authenticated requests run through an isolated content script in an open `www.bilibili.com` tab, using the website's normal request origin and session. Keep a Bilibili homepage or video tab open. If all eligible tabs close, the batch pauses; reopen or refresh a Bilibili page before resuming. Reload existing Bilibili tabs after updating the extension so the request handler is available.
+- A request rejection is different from a signed-out account. HTTP 403/412 indicate a rejected request, and HTTP 429 indicates rate limiting. Errors identify the failing operation and status. If login verification is unavailable, the popup retains the last known account and disables new block requests until verification succeeds.
 - Each entry shows a pending, processing, blocked, or failed state. Failures include an explanation and are not reported as successful blocks.
 - Expired authentication, an account change, or a risk-control response pauses the batch. Resolve sign-in or verification on Bilibili, then resume from the popup when prompted. A different account cannot resume another account's batch.
 - Canceling pending tasks stops items that have not yet been executed. It does not undo completed blocks. Use Bilibili's own blacklist management to unblock an account.
@@ -119,6 +121,8 @@ extension/                  Loadable extension runtime
   manifest.json             Manifest V3 configuration and permissions
   detector.js               Promotion and video destination detection
   content.js                Current-page scanning and candidate messages
+  site-api.js               Isolated site-context requests and actor checks
+  site-transport.js         Fixed-operation messages to eligible Bilibili tabs
   background.js             Identity checks, session state, queues, and badges
   api.js / core.js           Fixed website endpoints and state processing
   popup.html/js/css         Toolbar interface
@@ -130,12 +134,12 @@ scripts/package.py          Shared validation and packaging entry point
 | Permission or host | Purpose |
 | --- | --- |
 | `storage` | Store current-page candidates and task progress for the browser session. |
-| `cookies` | Read the current account information and CSRF value needed for operations, without persisting authentication credentials. |
+| `cookies` | Observe authentication changes and pause tasks when the account changes. CSRF values are read only inside the isolated site handler and are never returned to the background worker. |
 | `alarms` | Check queue recovery after the background worker is suspended. |
 | `www.bilibili.com` | Load content scripts in top-level Bilibili pages; scanning is limited to the homepage and video pages. |
 | `api.bilibili.com` | Query video uploaders and authentication or relationship state, and submit blocks explicitly requested through the popup. |
 
-Detection data and task state are processed locally. Website requests are sent only to Bilibili; there are no analytics services or remote scripts. Development validation uses simulated responses rather than automatically blocking real accounts. Temporary test code and fixtures are removed after validation; permanent packaging checks remain in the build script.
+Detection data and task state are processed locally. Website requests are sent only to Bilibili; there are no analytics services or remote scripts. Automated development checks use simulated responses rather than blocking real accounts. Temporary test code and fixtures are removed after validation; permanent packaging checks remain in the build script.
 
 ## Official references
 

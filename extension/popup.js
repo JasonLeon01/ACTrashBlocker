@@ -77,6 +77,10 @@ function queueBusy() {
   return Boolean(state?.queue?.running || state?.queue?.paused);
 }
 
+function accountAllowsBlocking() {
+  return Boolean(state?.account?.loggedIn) && state.account.verified !== false;
+}
+
 function actionable(candidate) {
   return validUid(candidate.uid) && ['pending', 'failed'].includes(candidate.status);
 }
@@ -89,10 +93,15 @@ function renderAccount() {
   const account = state?.account;
   elements['refresh-account'].disabled = accountPending || actionPending;
   elements['refresh-account'].textContent = accountPending ? '检查中…' : '刷新';
-  elements['login-link'].hidden = accountPending || Boolean(account?.loggedIn);
+  elements['login-link'].hidden = accountPending || !account || account.verified === false || Boolean(account.loggedIn);
   if (accountPending || !account) {
     elements.account.dataset.state = 'checking';
     elements['account-text'].textContent = accountPending ? '正在检查登录状态…' : '尚未确认登录状态';
+  } else if (account.verified === false) {
+    elements.account.dataset.state = 'unverified';
+    const cachedName = account.loggedIn ? ` · ${text(account.name, `UID ${account.uid}`)}` : '';
+    const reason = text(account.error);
+    elements['account-text'].textContent = `登录状态暂无法验证${cachedName}${reason ? `：${reason}` : ''}`;
   } else if (account.loggedIn) {
     elements.account.dataset.state = 'logged-in';
     elements['account-text'].textContent = `已登录 · ${text(account.name, `UID ${account.uid}`)}`;
@@ -107,6 +116,7 @@ function renderQueue() {
   const queue = state?.queue;
   elements.queue.hidden = !queue || !(queue.total > 0);
   if (elements.queue.hidden) return;
+  if (queue.paused && elements.notice.dataset.kind === 'info') showNotice('');
   const total = Math.max(0, Number(queue.total) || 0);
   const done = Math.min(total, Math.max(0, Number(queue.done) || 0));
   const failed = Math.max(0, Number(queue.failed) || 0);
@@ -119,7 +129,8 @@ function renderQueue() {
     : failed ? `${failed} 项未成功，可在名单中查看原因。` : '可在 B 站黑名单设置中管理已拉黑的 UP 主。');
   elements['queue-actions'].hidden = !queue.paused && !queue.running;
   elements['resume-queue'].hidden = !queue.paused;
-  elements['resume-queue'].disabled = actionPending || !state?.account?.loggedIn;
+  elements['resume-queue'].disabled = actionPending || accountPending ||
+    (state?.account?.verified !== false && !state?.account?.loggedIn);
   elements['cancel-queue'].disabled = actionPending;
 }
 
@@ -140,8 +151,9 @@ function renderCandidate(candidate) {
   const button = node('button', 'candidate-action', labels[candidate.status] ?? '不可拉黑');
   button.type = 'button';
   button.dataset.candidateId = candidate.id;
-  button.disabled = actionPending || queueBusy() || !state?.account?.loggedIn || !actionable(candidate);
-  if (actionable(candidate) && !state?.account?.loggedIn) button.title = '请先登录 B 站并刷新登录状态';
+  button.disabled = actionPending || accountPending || queueBusy() || !accountAllowsBlocking() || !actionable(candidate);
+  if (actionable(candidate) && state?.account?.verified === false) button.title = '登录状态暂无法验证，请刷新后重试';
+  else if (actionable(candidate) && !state?.account?.loggedIn) button.title = '请先登录 B 站并刷新登录状态';
   else if (actionable(candidate) && queueBusy()) button.title = '请先完成或取消当前任务';
   else button.title = labels[candidate.status] ?? '身份未确认，无法拉黑';
   button.setAttribute('aria-label', `${labels[candidate.status] ?? '不可拉黑'} ${name}`);
@@ -188,16 +200,18 @@ function render() {
   renderQueue();
   const candidates = state?.supported ? state.page?.candidates ?? [] : [];
   const eligible = eligibleCandidates();
-  const canAct = !actionPending && !accountPending && !queueBusy() && state?.account?.loggedIn && state?.supported;
+  const canAct = !actionPending && !accountPending && !queueBusy() && accountAllowsBlocking() && state?.supported;
   elements.main.setAttribute('aria-busy', String(!state));
   elements['count-badge'].textContent = `${eligible.length} 位待处理`;
   elements['block-all'].textContent = actionPending ? '正在提交…' : `一键拉黑全部（${eligible.length}）`;
   elements['block-all'].disabled = !canAct || eligible.length === 0;
-  elements['footer-note'].textContent = queueBusy()
-    ? '请先完成或取消当前任务'
-    : state?.account && !state.account.loggedIn
-      ? '登录 B 站后，点击上方“刷新”'
-      : '点击后加入 B 站账号黑名单';
+  elements['footer-note'].textContent = state?.account?.verified === false
+    ? '请点击上方“刷新”重新验证登录状态'
+    : queueBusy()
+      ? '请先完成或取消当前任务'
+      : state?.account && !state.account.loggedIn
+        ? '登录 B 站后，点击上方“刷新”'
+        : '点击后加入 B 站账号黑名单';
   elements['list-heading'].hidden = candidates.length === 0;
   elements['list-meta'].textContent = `共 ${candidates.length} 项 · 按 UID 合并`;
   elements['empty-state'].hidden = candidates.length > 0;
@@ -258,7 +272,7 @@ async function refreshAccount() {
   accountPending = true;
   render();
   try {
-    const response = await send('REFRESH_ACCOUNT');
+    const response = await send('REFRESH_ACCOUNT', Number.isInteger(tabId) ? { tabId } : {});
     if (state) state.account = response.account;
   } catch (error) {
     showNotice(text(error.message, '登录状态检查失败，请稍后重试。'), 'error');
@@ -272,6 +286,7 @@ async function refreshAccount() {
 async function runAction(type, payload = {}, successMessage = '') {
   if (actionPending) return;
   actionPending = true;
+  showNotice('');
   render();
   try {
     await send(type, payload);
@@ -286,7 +301,7 @@ async function runAction(type, payload = {}, successMessage = '') {
 }
 
 function blockCandidates(ids) {
-  if (!state?.page || !state.account?.loggedIn || queueBusy() || !ids.length) return;
+  if (!state?.page || !accountAllowsBlocking() || queueBusy() || !ids.length) return;
   const currentIds = new Set(eligibleCandidates().map((candidate) => candidate.id));
   const candidateIds = [...new Set(ids)].filter((id) => currentIds.has(id));
   if (!candidateIds.length) return;
@@ -300,7 +315,7 @@ elements.candidates.addEventListener('click', (event) => {
 elements['block-all'].addEventListener('click', () => blockCandidates(eligibleCandidates().map((candidate) => candidate.id)));
 elements['refresh-account'].addEventListener('click', () => void refreshAccount());
 elements['dismiss-notice'].addEventListener('click', () => showNotice(''));
-elements['resume-queue'].addEventListener('click', () => void runAction('RESUME_QUEUE', {}, '正在继续处理剩余名单。'));
+elements['resume-queue'].addEventListener('click', () => void runAction('RESUME_QUEUE'));
 elements['cancel-queue'].addEventListener('click', () => void runAction('CANCEL_QUEUE', {}, '已取消未执行的任务，已完成的拉黑不会撤销。'));
 
 async function initialize() {

@@ -1,6 +1,6 @@
 import { SITE, STORAGE_KEY, POPUP_COOLDOWN, routeOf, normalizeVideo, videoKey, evidenceList,
   mergeEvidence, mergeVideos, emptyState, candidateView, queueSummary, taskActive } from './core.js';
-import { ApiError, getAccount, getOwner, isBlocked, getWriteToken, blockUser } from './api.js';
+import { ApiError, getAccount, getOwner, isBlocked, blockUser } from './api.js';
 
 const WATCHDOG = 'promo-blocker-work';
 let state = emptyState();
@@ -62,21 +62,25 @@ async function contentContext(message, sender) {
   return { tabId: sender.tab.id, documentId: sender.documentId, url: url.href, route: routeOf(url.href) };
 }
 
-async function refreshAccount() {
+async function refreshAccount(tabId) {
   if (accountRequest) return accountRequest;
   accountRequest = (async () => {
-    const epoch = (await snapshot()).authEpoch;
+    const before = await snapshot();
+    const epoch = before.authEpoch;
     let account;
-    try { account = await getAccount(); }
+    try { account = await getAccount({ tabId }); }
     catch (error) {
-      account = { loggedIn: false, uid: null, name: '', error: `无法确认登录状态：${error.message}` };
+      // A rejected/unavailable request is not evidence that the account signed out.
+      account = { ...(before.account || { loggedIn: false, uid: null, name: '' }),
+        verified: false, error: error.message || '暂时无法确认登录状态' };
     }
     await update(s => {
-      if (s.authEpoch !== epoch) account = { loggedIn: false, uid: null, name: '', error: '登录状态刚刚变化，请刷新后重试' };
+      if (s.authEpoch !== epoch) account = { verified: false, loggedIn: false, uid: null, name: '', error: '登录状态刚刚变化，请刷新后重试' };
       s.account = account;
-      if (s.queue?.tasks.some(taskActive) && (!account.loggedIn || account.uid !== s.queue.actorUid)) {
+      if (s.queue?.tasks.some(taskActive) && (account.verified === false || !account.loggedIn || account.uid !== s.queue.actorUid)) {
         s.queue.paused = true;
-        s.queue.reason = account.loggedIn ? '当前 B 站账号与提交任务时不同，请切回原账号或取消剩余任务' : account.error || '请先登录 B 站';
+        s.queue.reason = account.verified === false ? account.error
+          : account.loggedIn ? '当前 B 站账号与提交任务时不同，请切回原账号或取消剩余任务' : account.error || '请先登录 B 站';
       }
     });
     await refreshBadges();
@@ -263,15 +267,15 @@ async function resolvePending() {
 
 class QueueStopped extends Error {}
 
-async function confirmedRelation(targetUid, actorUid) {
+async function confirmedRelation(targetUid, actorUid, tabId, stage = '查询拉黑关系') {
   const before = await snapshot();
-  const user = await chrome.cookies.get({ url: SITE, name: 'DedeUserID' });
-  if (!before.account?.loggedIn || before.account.uid !== actorUid || user?.value !== actorUid) {
+  if (!before.account?.loggedIn || before.account.verified === false || before.account.uid !== actorUid) {
     throw new ApiError('登录账号已变化，暂无法确认本批次的拉黑关系', { code: 'ACCOUNT_CHANGED', pause: true, uncertain: true });
   }
-  const blocked = await isBlocked(targetUid);
+  // The isolated site handler verifies the actor in the same session as the request.
+  const blocked = await isBlocked(targetUid, actorUid, { tabId, stage });
   const after = await snapshot();
-  if (after.authEpoch !== before.authEpoch || after.account?.uid !== actorUid || !after.account?.loggedIn) {
+  if (after.authEpoch !== before.authEpoch || after.account?.uid !== actorUid || !after.account?.loggedIn || after.account.verified === false) {
     throw new ApiError('查询期间登录状态发生变化，请切回原账号后继续', { code: 'ACCOUNT_CHANGED', pause: true, uncertain: true });
   }
   return { blocked, epoch: before.authEpoch };
@@ -290,7 +294,7 @@ async function finishTask(queueId, taskId, status, error = '', proofEpoch = null
     if (s.queue?.id !== queueId) return;
     const task = s.queue.tasks.find(t => t.id === taskId);
     if (!task) return;
-    if (status === 'blocked' && (s.authEpoch !== proofEpoch || s.account?.uid !== s.queue.actorUid || !s.account?.loggedIn)) {
+    if (status === 'blocked' && (s.authEpoch !== proofEpoch || s.account?.uid !== s.queue.actorUid || !s.account?.loggedIn || s.account.verified === false)) {
       throw new ApiError('确认关系后登录状态发生变化，已暂停任务', { code: 'ACCOUNT_CHANGED', pause: true, uncertain: true });
     }
     task.status = status;
@@ -327,11 +331,12 @@ async function runTask(queue, initialTask) {
   let writeSucceeded = false;
   try {
     await assertTask(queueId, taskId, wasSubmitted);
-    const account = await refreshAccount();
+    const account = await refreshAccount(initialTask.tabId);
+    if (account.verified === false) throw new ApiError(account.error || '暂时无法确认登录状态', { code: 'AUTH_UNAVAILABLE', pause: true });
     if (!account.loggedIn || account.uid !== queue.actorUid) throw new ApiError('登录状态或账号已变化，请检查后继续', { pause: true });
     await assertTask(queueId, taskId, wasSubmitted);
     if (initialTask.uid === account.uid) throw new ApiError('不能拉黑当前登录账号');
-    const existingRelation = await confirmedRelation(initialTask.uid, queue.actorUid);
+    const existingRelation = await confirmedRelation(initialTask.uid, queue.actorUid, initialTask.tabId, wasSubmitted ? '核对上次拉黑结果' : '查询拉黑关系');
     if (existingRelation.blocked) {
       await assertTask(queueId, taskId, wasSubmitted);
       await finishTask(queueId, taskId, 'blocked', '', existingRelation.epoch);
@@ -342,7 +347,6 @@ async function runTask(queue, initialTask) {
       return;
     }
     const tokenEpoch = (await snapshot()).authEpoch;
-    const csrf = await getWriteToken(queue.actorUid);
     const current = await snapshot();
     await sleep(Math.max(0, 1000 - (Date.now() - current.lastPostAt)));
     await assertTask(queueId, taskId);
@@ -351,15 +355,15 @@ async function runTask(queue, initialTask) {
       const q = s.queue;
       const task = q?.tasks.find(t => t.id === taskId);
       if (q?.id !== queueId || q.paused || q.cancelRequested || !task || !taskActive(task) ||
-          !s.account?.loggedIn || s.account.uid !== queue.actorUid || s.authEpoch !== tokenEpoch) throw new QueueStopped();
+          !s.account?.loggedIn || s.account.verified === false || s.account.uid !== queue.actorUid || s.authEpoch !== tokenEpoch) throw new QueueStopped();
       task.attempted = true;
       s.lastPostAt = Date.now();
     });
     submitted = true;
-    await blockUser(initialTask.uid, csrf);
+    await blockUser(initialTask.uid, queue.actorUid, { tabId: initialTask.tabId });
     writeSucceeded = true;
-    let confirmed = await confirmedRelation(initialTask.uid, queue.actorUid);
-    if (!confirmed.blocked) { await sleep(500); confirmed = await confirmedRelation(initialTask.uid, queue.actorUid); }
+    let confirmed = await confirmedRelation(initialTask.uid, queue.actorUid, initialTask.tabId, '确认拉黑结果');
+    if (!confirmed.blocked) { await sleep(500); confirmed = await confirmedRelation(initialTask.uid, queue.actorUid, initialTask.tabId, '确认拉黑结果'); }
     await finishTask(queueId, taskId, confirmed.blocked ? 'blocked' : 'failed', confirmed.blocked ? '' : '请求已提交，但尚未确认拉黑关系，请稍后手动重试', confirmed.epoch);
   } catch (error) {
     if (error instanceof QueueStopped) {
@@ -391,7 +395,7 @@ async function runTask(queue, initialTask) {
     }
     if (submitted) {
       try {
-        const relation = await confirmedRelation(initialTask.uid, queue.actorUid);
+        const relation = await confirmedRelation(initialTask.uid, queue.actorUid, initialTask.tabId, '核对拉黑结果');
         if (relation.blocked) {
           await finishTask(queueId, taskId, 'blocked', '', relation.epoch);
           return;
@@ -430,12 +434,14 @@ async function startBlock(message) {
       !message.candidateIds.length || message.candidateIds.length > 1000) throw new Error('请选择有效的 UP 主');
   const tab = await chrome.tabs.get(message.tabId);
   if (!tab.active) throw new Error('当前标签页已变化，请重新打开弹窗');
-  const account = await refreshAccount();
+  if (Boolean(tab.incognito) !== Boolean(chrome.extension?.inIncognitoContext)) throw new Error('当前窗口与插件的登录会话不一致，请在普通 B 站窗口中操作');
+  const account = await refreshAccount(message.tabId);
+  if (account.verified === false) throw new ApiError(account.error || '暂时无法确认登录状态', { code: 'AUTH_UNAVAILABLE' });
   if (!account.loggedIn) throw new ApiError(account.error || '请先登录 B 站', { code: 'LOGIN_REQUIRED' });
   await update(s => {
     const page = currentPage(s, message.tabId, message.pageId);
     if (!page || routeOf(tab.url) !== page.route) throw new Error('页面已变化，请查看最新名单后再操作');
-    if (!s.account?.loggedIn || s.account.uid !== account.uid) throw new Error('登录状态已变化，请刷新后重试');
+    if (!s.account?.loggedIn || s.account.verified === false || s.account.uid !== account.uid) throw new Error('登录状态已变化，请刷新后重试');
     if (s.queue?.tasks.some(taskActive)) throw new Error('请先完成或取消当前批次');
     const ids = [...new Set(message.candidateIds)];
     const candidates = ids.map(id => page.candidates.find(c => c.id === id));
@@ -475,12 +481,14 @@ async function dispatch(message, sender) {
   if (!isPopup(sender)) throw new Error('操作只能由插件弹窗发起');
   switch (message.type) {
     case 'GET_STATE': return getState(message);
-    case 'REFRESH_ACCOUNT': return { ok: true, account: await refreshAccount() };
+    case 'REFRESH_ACCOUNT': return { ok: true, account: await refreshAccount(message.tabId) };
     case 'BLOCK': return startBlock(message);
     case 'RESUME_QUEUE': {
-      const account = await refreshAccount();
+      const pending = (await snapshot()).queue?.tasks.find(taskActive);
+      const account = await refreshAccount(pending?.tabId);
       await update(s => {
         if (!s.queue?.tasks.some(taskActive)) throw new Error('没有可继续的任务');
+        if (account.verified === false) throw new Error(account.error || '暂时无法确认登录状态，请刷新 B 站页面后重试');
         if (!account.loggedIn || account.uid !== s.queue.actorUid) throw new Error('请切回提交批次时的 B 站账号，或取消剩余任务');
         s.queue.paused = false;
         s.queue.reason = '';
