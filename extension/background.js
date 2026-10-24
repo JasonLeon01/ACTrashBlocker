@@ -13,6 +13,15 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const ready = chrome.storage.session.get(STORAGE_KEY).then(stored => {
   if (stored[STORAGE_KEY]?.version === 1) state = { ...emptyState(), ...stored[STORAGE_KEY] };
+  // Discard legacy display-ad placeholders; only video promotions belong in a page list.
+  for (const page of Object.values(state.pages)) {
+    page.candidates = page.candidates.filter(candidate => candidate.videos.some(video => normalizeVideo(video)));
+    for (const [key, detection] of Object.entries(page.detections)) {
+      if (!normalizeVideo(detection.video)) delete page.detections[key];
+    }
+    page.popupPending = page.popupPending && page.candidates.some(candidate =>
+      candidate.uid && !page.announcedUids.includes(candidate.uid));
+  }
 });
 
 function update(fn) {
@@ -169,14 +178,8 @@ async function detected(message, sender) {
       const evidence = evidenceList(item.evidence);
       if (!evidence.length) continue;
       const video = normalizeVideo(item.video);
-      const key = video ? videoKey(video) : item.key;
-      if (video && typeof item.replacesKey === 'string') {
-        const replaced = page.detections[item.replacesKey];
-        if (replaced && !replaced.video) {
-          delete page.detections[item.replacesKey];
-          page.candidates = page.candidates.filter(c => c.id !== `unresolved:${item.replacesKey}`);
-        }
-      }
+      if (!video) continue;
+      const key = videoKey(video);
       const existing = page.detections[key];
       if (existing) {
         existing.evidence = mergeEvidence(existing.evidence, evidence);
@@ -185,10 +188,10 @@ async function detected(message, sender) {
         continue;
       }
       const id = `unresolved:${key}`;
-      page.detections[key] = { key, video, evidence, status: video ? 'pending' : 'failed', candidateId: id };
-      page.candidates.push({ id, uid: null, name: video ? '正在确认 UP 主' : '无法识别 UP 主',
-        evidence, videos: video ? [video] : [], status: 'unresolved',
-        error: video ? '正在查询目标视频的投稿者…' : String(item.reason || '推广未提供可核验的 B 站视频地址').slice(0, 200) });
+      page.detections[key] = { key, video, evidence, status: 'pending', candidateId: id };
+      page.candidates.push({ id, uid: null, name: '正在确认 UP 主',
+        evidence, videos: [video], status: 'unresolved',
+        error: '正在查询目标视频的投稿者…' });
     }
   });
   await refreshBadge(context.tabId);

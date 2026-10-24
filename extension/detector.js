@@ -8,6 +8,7 @@
     ".feed-card", ".floor-single-card", ".video-page-special-card-small",
     ".ad-report", ".ad-floor-cover", ".strip-ad", "#slide_ad",
   ].join(",");
+  const NON_LAYOUT_CARD_SELECTOR = CARD_SELECTOR.split(",").filter(selector => selector !== ".card-box").join(",");
   const MARKERS = [
     [".bili-video-card__info--creative-ad", "小火箭推广标记"],
     [".bili-video-card__info--ad", "广告标记"],
@@ -27,9 +28,13 @@
   ].join(",");
   const VIDEO_HOSTS = new Set(["www.bilibili.com", "bilibili.com", "m.bilibili.com"]);
   const TARGET_PARAMS = ["url", "target_url", "target", "redirect_url", "jump_url", "landing_url", "landingpage_url"];
-  const cardIds = new WeakMap();
   const mainMarkerHistory = new WeakMap();
-  let nextCardId = 0;
+  const PRIMARY_LINKS = [
+    "a.bili-video-card__image--link", ".bili-video-card__image a[href]",
+    ".bili-video-card__info--tit a[href]", "a.bili-video-card__info--tit",
+    "a.pic", ".pic a[href]", "a.cover", ".cover a[href]",
+    "a.title", ".title a[href]", "h3 a[href]", "h4 a[href]",
+  ].join(",");
 
   const text = (value, max = 200) => String(value || "").replace(/\s+/gu, " ").trim().slice(0, max);
 
@@ -46,16 +51,24 @@
   }
 
   function videoFromURL(raw, base = "https://www.bilibili.com/", depth = 0) {
+    // Loading placeholders must not resolve to the currently playing video's URL.
+    if (typeof raw !== "string" || /^[?#]/u.test(raw.trim()) || /^(?:\.\.?\/?)$/u.test(raw.trim())) return null;
     const url = toURL(raw, base);
     if (!url || depth > 3) return null;
     if (url.hostname === "cm.bilibili.com") {
+      const destinations = [];
       for (const param of TARGET_PARAMS) {
-        const nested = url.searchParams.get(param);
-        if (!nested) continue;
-        const video = videoFromURL(nested, base, depth + 1);
-        if (video) return video;
+        for (const nested of url.searchParams.getAll(param)) {
+          if (!nested) continue;
+          const video = videoFromURL(nested, base, depth + 1);
+          // A game/product landing page must not fall through to a different
+          // query parameter that happens to contain a video URL.
+          if (!video) return null;
+          destinations.push(video);
+        }
       }
-      return null;
+      const unique = new Map(destinations.map(video => [videoKey(video), video]));
+      return unique.size === 1 ? [...unique.values()][0] : null;
     }
     if (!VIDEO_HOSTS.has(url.hostname)) return null;
     const match = url.pathname.match(/^\/video\/(BV[0-9A-Za-z]{10}|av[1-9]\d{0,17})\/?$/u);
@@ -95,40 +108,76 @@
     return true;
   }
 
-  function unresolvedKey(card) {
-    if (!cardIds.has(card)) cardIds.set(card, `unresolved:${++nextCardId}`);
-    return cardIds.get(card);
-  }
-
   function findCard(marker) {
-    return marker.closest(".bili-video-card, .video-page-card-small, .video-card-ad-small, .video-page-game-card-small, .recommend-video-card, .feed-card") || marker.closest(CARD_SELECTOR);
+    return marker.closest(CARD_SELECTOR);
   }
 
   function belongsTo(card, element) {
     // A nested recommendation/ad must not contribute the surrounding video's identity.
-    return findCard(element) === card;
+    const nearest = findCard(element);
+    if (nearest === card) return true;
+    // The immediate card-box of a standard small video card is a layout shell,
+    // not permission to cross arbitrary nested advertising/recommendation cards.
+    return nearest?.parentElement === card && nearest.matches(".card-box") &&
+      !nearest.matches(NON_LAYOUT_CARD_SELECTOR) &&
+      card.matches(".video-page-card-small, .video-card-ad-small");
   }
 
-  function extractVideo(card, base, preferredLink) {
-    const choices = new Map();
-    const nodes = preferredLink
-      ? [preferredLink]
-      : matchesIncludingRoot(card, "a[href], [data-target-url]").filter(node => belongsTo(card, node));
-    for (const node of nodes) {
-      for (const attr of ["data-target-url", "href"]) {
-        const video = videoFromURL(node.getAttribute(attr), base);
-        if (!video) continue;
-        const title = text(node.getAttribute("title") || node.querySelector("img")?.getAttribute("alt") || node.textContent);
-        const key = videoKey(video);
-        const existing = choices.get(key);
-        if (!existing || (!existing.title && title)) choices.set(key, { ...video, title });
-      }
+  function cmDestinationParameters(node, base) {
+    const url = toURL(node.getAttribute("href"), base);
+    return url?.hostname === "cm.bilibili.com" && TARGET_PARAMS.some(param => url.searchParams.has(param));
+  }
+
+  function targetVideo(node, base) {
+    const href = node.getAttribute("href");
+    if (!node.hasAttribute("data-target-url")) return videoFromURL(href, base);
+    const video = videoFromURL(node.getAttribute("data-target-url"), base);
+    if (!video) return null;
+    const hrefURL = toURL(href, base);
+    if (hrefURL && !href.trim().startsWith("#") && (hrefURL.hostname !== "cm.bilibili.com" || cmDestinationParameters(node, base))) {
+      const linkedVideo = videoFromURL(href, base);
+      if (!linkedVideo || videoKey(linkedVideo) !== videoKey(video)) return null;
     }
-    if (choices.size !== 1) return { video: null, reason: choices.size ? "推广卡片包含多个目标视频，无法确认对应 UP 主" : "推广卡片未提供可核验的 B 站视频地址" };
+    return video;
+  }
+
+  function extractVideo(card, base) {
+    const scoped = matchesIncludingRoot(card, "a[href], [data-target-url]")
+      .filter(node => belongsTo(card, node) && visible(node));
+    const explicitTargets = scoped.filter(node => node.hasAttribute("data-target-url"));
+    const adLinks = scoped.filter(node => toURL(node.getAttribute("href"), base)?.hostname === "cm.bilibili.com");
+    let targets;
+    if (explicitTargets.length) {
+      // Explicit non-video destinations veto a candidate. Do not search an
+      // unrelated title/thumbnail link after a game or product target fails.
+      targets = [...new Set([...explicitTargets, ...adLinks.filter(node => cmDestinationParameters(node, base))])];
+    } else if (adLinks.length) {
+      targets = adLinks;
+    } else {
+      const links = scoped.filter(node => node.matches("a[href]"));
+      const primary = links.filter(node => node.matches(PRIMARY_LINKS));
+      targets = primary.length ? primary : links.filter(node => {
+        const href = node.getAttribute("href")?.trim() || "";
+        if (!href || href.startsWith("#") || /^javascript:\s*(?:void\(0\)|;)?\s*;?$/iu.test(href)) return false;
+        const url = toURL(href, base);
+        // A creator profile is ancillary to the video card's destination.
+        return !(url?.hostname === "space.bilibili.com" && /^\/[1-9]\d*\/?$/u.test(url.pathname));
+      });
+    }
+    const choices = new Map();
+    for (const node of targets) {
+      const video = targetVideo(node, base);
+      if (!video) return null;
+      const title = text(node.getAttribute("title") || node.querySelector("img")?.getAttribute("alt") || node.textContent);
+      const key = videoKey(video);
+      const existing = choices.get(key);
+      if (!existing || (!existing.title && title)) choices.set(key, { ...video, title });
+    }
+    if (choices.size !== 1) return null;
     const video = [...choices.values()][0];
     const heading = card.querySelector(".bili-video-card__info--tit, .title, h3, h4");
-    if (heading && belongsTo(card, heading)) video.title = text(heading.getAttribute("title") || heading.textContent) || video.title;
-    return { video };
+    if (heading && belongsTo(card, heading) && visible(heading)) video.title = text(heading.getAttribute("title") || heading.textContent) || video.title;
+    return video;
   }
 
   function mainVideoCandidates(doc, base) {
@@ -162,15 +211,19 @@
 
   function scan(root = document, base = root.ownerDocument?.URL || root.URL) {
     if (!pageKey(base)) return [];
+    // A late href update may be observed inside the standard small-card layout
+    // shell, while its promotion class lives on the immediate parent card.
+    if (root.nodeType === 1 && root.matches(".card-box") &&
+      root.parentElement?.matches(".video-page-card-small, .video-card-ad-small") &&
+      belongsTo(root.parentElement, root)) root = root.parentElement;
     const doc = root.nodeType === 9 ? root : root.ownerDocument;
     const cards = new Map();
-    const add = (marker, evidence, preferredLink) => {
+    const add = (marker, evidence) => {
       if (!visible(marker)) return;
       const card = findCard(marker);
       if (!card || !visible(card)) return;
-      if (!cards.has(card)) cards.set(card, { evidence: new Set(), links: new Set() });
+      if (!cards.has(card)) cards.set(card, { evidence: new Set() });
       cards.get(card).evidence.add(evidence);
-      if (preferredLink) cards.get(card).links.add(preferredLink);
     };
     for (const [selector, evidence] of MARKERS) {
       for (const marker of matchesIncludingRoot(root, selector)) add(marker, evidence);
@@ -181,21 +234,17 @@
     }
     for (const link of matchesIncludingRoot(root, "a[href*='cm.bilibili.com' i]")) {
       if (toURL(link.getAttribute("href"), base)?.hostname === "cm.bilibili.com") {
-        add(link, "B 站广告推广链接", link);
+        add(link, "B 站广告推广链接");
       }
     }
     const result = [];
     for (const [card, marker] of cards) {
-      // Prefer the explicit advertising target to unrelated anchors elsewhere in a card.
-      const targets = marker.links.size ? [...marker.links].map(link => extractVideo(card, base, link)) : [extractVideo(card, base)];
-      const identified = new Map(targets.filter(item => item.video).map(item => [videoKey(item.video), item.video]));
-      const video = identified.size === 1 ? [...identified.values()][0] : null;
-      const previousKey = unresolvedKey(card);
+      const video = extractVideo(card, base);
+      if (!video) continue;
       result.push({
-        key: video ? videoKey(video) : previousKey,
+        key: videoKey(video),
         video,
         evidence: [...marker.evidence],
-        ...(video ? { replacesKey: previousKey } : { reason: identified.size > 1 ? "推广卡片包含多个目标视频，无法确认对应 UP 主" : targets[0]?.reason || "无法识别推广视频" }),
       });
     }
     result.push(...mainVideoCandidates(doc, base));

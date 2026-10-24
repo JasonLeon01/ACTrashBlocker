@@ -8,7 +8,7 @@ The documentation is in English. The extension popup currently uses Chinese text
 
 ## Features
 
-- Detects supported promotion markers, including rocket icons, explicit advertisement card structures, and advertising links that contain a verifiable Bilibili video destination.
+- Detects supported promotion markers, including rocket icons, only when the card has a unique, verifiable Bilibili video destination. Advertising redirect links are supported when their destination is a Bilibili video.
 - Resolves the actual uploader UID through video details. Nicknames, advertising parameters, and the uploader of a neighboring video are never treated as the target UID. Multiple videos from the same uploader appear as one entry.
 - Shows the uploader name, UID, source videos, detection evidence, and an individual **Block** control. **Block all** submits every eligible entry in the current list. Entries whose uploader cannot be verified show a reason and cannot be blocked.
 - Keeps a separate list for each tab's current page. Scrolling and refreshing recommendations add entries; reloading the page or navigating to another page starts a new list.
@@ -17,6 +17,8 @@ The documentation is in English. The extension popup currently uses Chinese text
 - Continues an explicitly submitted batch when the popup closes or the page changes. Progress is stored for the browser session. After the background worker restarts, it checks in-progress relationships before continuing to avoid duplicate submissions.
 
 The extension only identifies explicit promotion signals. It does not analyze audio or video, infer sponsorship from titles, or hide videos locally. Bilibili controls recommendation behavior after an account is blacklisted.
+
+Pure display advertisements, game or product landing pages, and ads without a verifiable Bilibili video destination are ignored. They do not appear in the popup or its badge, even as unknown-uploader entries. A confirmed video promotion whose uploader lookup fails can still show the lookup error; it cannot be blocked until its uploader is verified.
 
 A commercial disclosure on the main video must agree with the page's video identity metadata. If that metadata is missing, or an old disclosure remains during navigation, the extension conservatively skips that main-video association to avoid blocking the wrong uploader. Recommendation cards are detected separately.
 

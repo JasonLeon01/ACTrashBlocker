@@ -115,11 +115,6 @@
       for (const item of detector.scan(root, snapshot.url)) {
         const previous = snapshot.known.get(item.key);
         if (previous) item.evidence = [...new Set([...previous.evidence, ...item.evidence])];
-        if (item.replacesKey) {
-          snapshot.known.delete(item.replacesKey);
-          snapshot.pending.delete(item.replacesKey);
-          snapshot.sent.delete(item.replacesKey);
-        }
         snapshot.known.set(item.key, item);
         if (snapshot.sent.get(item.key) !== JSON.stringify(item)) snapshot.pending.set(item.key, item);
       }
