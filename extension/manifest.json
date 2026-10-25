@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "ACTrashBlocker",
   "short_name": "ACTrashBlocker",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Detect promoted Bilibili videos, verify their creators, and choose who to block individually or in a batch.",
   "minimum_chrome_version": "127",
   "permissions": ["storage", "cookies", "alarms"],

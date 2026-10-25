@@ -65,8 +65,8 @@ python3 scripts/package.py
 The first command validates the Manifest version, permissions, resource references, and JavaScript syntax without producing a package. The second performs the same checks, then generates:
 
 ```text
-dist/ACTrashBlocker-v0.1.0.zip
-dist/ACTrashBlocker-v0.1.0.zip.sha256
+dist/ACTrashBlocker-v0.2.0.zip
+dist/ACTrashBlocker-v0.2.0.zip.sha256
 ```
 
 The version is read from `extension/manifest.json`. The ZIP contains only runtime resources referenced by the Manifest, HTML, CSS, and JavaScript, with `manifest.json` at its root. Repository documentation, CI configuration, packaging scripts, test files, and credentials are excluded. Archive ordering and timestamps are fixed so identical inputs produce reproducible packages. The `dist` directory is ignored by Git.
@@ -75,7 +75,7 @@ On macOS, verify a downloaded or locally generated checksum from the output dire
 
 ```sh
 cd dist
-shasum -a 256 -c ACTrashBlocker-v0.1.0.zip.sha256
+shasum -a 256 -c ACTrashBlocker-v0.2.0.zip.sha256
 ```
 
 To choose another output location:
@@ -100,19 +100,21 @@ For ordinary branch pushes, pull requests, and manual runs, the workflow only pr
 
 Pushing a version tag publishes a regular, non-draft GitHub Release after the build succeeds. Both of these tag formats are accepted:
 
-- `v<manifest-version>`, for example `v0.1.0`.
-- `<manifest-version>`, for example `0.1.0`.
+- `v<manifest-version>`, for example `v0.2.0`.
+- `<manifest-version>`, for example `0.2.0`.
 
-The tag version must exactly match `version` in `extension/manifest.json`. A mismatch fails the release workflow instead of publishing a package under the wrong version.
+The tag version must exactly match `version` in `extension/manifest.json` **in the tagged commit**. The workflow checks this before packaging. Creating a tag does not automatically change the extension version; a mismatch stops the workflow before artifacts or a Release are published.
 
-To publish a version, first update the Manifest version, validate the package, and commit the release-ready source yourself. Then create and push the corresponding tag. For version `0.1.0`:
+To publish a version, first update the Manifest version, validate the package, and commit the release-ready source yourself. Then create and push the corresponding tag. For version `0.2.0`, after committing `"version": "0.2.0"`, and provided this tag does not already exist:
 
 ```sh
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 These commands are release instructions for the maintainer; the build script does not create, commit, or push tags.
+
+If a tag build fails with `Invalid release tag`, check the version stored in that tag with `git show v0.2.0:extension/manifest.json` (substitute your tag). For example, tagging a commit containing version `0.1.0` as `v0.2.0` will fail even if the working tree is later updated. Commit the corrected version first, then either replace the failed tag locally and remotely so it points to that corrected commit, or choose a new version and matching unused tag. Only replace a failed tag that has not been published as a Release; preserve published versions. [Re-running an old workflow uses the original commit and ref](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs), so it does not pick up later commits.
 
 The tag-only release job has `contents: write` permission and uses GitHub's built-in `GITHUB_TOKEN`. It attaches `ACTrashBlocker-v<version>.zip` and its `.zip.sha256` file to the [Release](https://github.com/JasonLeon01/ACTrashBlocker/releases). Release assets provide a durable download location and are not subject to the Actions artifact's 30-day retention. Rerunning the workflow adds or updates the generated assets on an existing release while preserving its existing title and notes, including manual edits. If a previous attempt left a draft, the rerun publishes it after uploading the assets successfully. Repositories with immutable releases enabled require a new version instead of replacing published assets.
 

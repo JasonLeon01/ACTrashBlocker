@@ -38,9 +38,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Validate and package extension
-        run: python scripts/package.py
-
       - name: Read package version and validate release tag
         id: package
         shell: python
@@ -58,10 +55,15 @@ jobs:
               if tag not in (version, f'v{version}'):
                   raise SystemExit(
                       f'Invalid release tag {tag!r}: expected {version!r} or {f"v{version}"!r} '
-                      'to match extension/manifest.json exactly.'
+                      'to match extension/manifest.json exactly. '
+                      'Update and commit the manifest version before creating the release tag. '
+                      'Re-running this job uses the original commit and will not include later fixes.'
                   )
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               output.write(f'version={version}\n')
+
+      - name: Validate and package extension
+        run: python scripts/package.py
 
       - name: Upload ZIP and checksum
         id: artifact
