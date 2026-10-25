@@ -13,10 +13,25 @@
   let retryDelay = 1000;
   let needsFullScan = false;
   const roots = new Set();
+  const hiddenAds = new Set();
+  const HIDDEN_ATTRIBUTE = "data-actrashblocker-hidden";
   const MAX_BATCH = 40;
 
   function contextGone(error) {
     return !chrome.runtime?.id || /extension context invalidated/iu.test(String(error?.message || error));
+  }
+
+  function restoreAds() {
+    for (const element of hiddenAds) element.removeAttribute(HIDDEN_ATTRIBUTE);
+    hiddenAds.clear();
+  }
+
+  function releaseDetachedAds() {
+    for (const element of hiddenAds) {
+      if (element.isConnected) continue;
+      element.removeAttribute(HIDDEN_ATTRIBUTE);
+      hiddenAds.delete(element);
+    }
   }
 
   function stop() {
@@ -25,7 +40,9 @@
     clearTimeout(scanTimer);
     clearTimeout(flushTimer);
     clearInterval(routeTimer);
+    document.removeEventListener("load", resourceLoaded, true);
     roots.clear();
+    restoreAds();
   }
 
   function scheduleFlush(delay = 400) {
@@ -74,9 +91,12 @@
   }
 
   function routeChanged() {
+    if (stopped) return false;
+    if (!chrome.runtime?.id) { stop(); return false; }
     const key = detector.pageKey(location.href);
     const route = key || `unsupported:${location.pathname}`;
     if (page?.route === route) return false;
+    restoreAds();
     page = {
       id: `${crypto.randomUUID()}-${++sequence}`,
       route,
@@ -106,11 +126,17 @@
 
   function runScan() {
     scanTimer = null;
-    if (stopped || routeChanged() || !page?.supported) return;
+    if (routeChanged() || stopped || !page?.supported) return;
     const snapshot = page;
-    const targets = needsFullScan ? [document] : [...roots].filter(root => root.isConnected);
+    // Recheck our hidden nodes even if the site has removed their card classes.
+    // All inspection and hiding stays synchronous, so no intermediate frame is painted.
+    const candidates = needsFullScan ? [document] : [...new Set([...roots, ...hiddenAds])]
+      .filter(root => root.isConnected);
+    const targets = candidates.filter(root => !candidates.some(other => other !== root && other.contains(root)));
+    restoreAds();
     needsFullScan = false;
     roots.clear();
+    const displayAds = new Set();
     for (const root of targets) {
       for (const item of detector.scan(root, snapshot.url)) {
         const previous = snapshot.known.get(item.key);
@@ -118,16 +144,33 @@
         snapshot.known.set(item.key, item);
         if (snapshot.sent.get(item.key) !== JSON.stringify(item)) snapshot.pending.set(item.key, item);
       }
+      for (const element of detector.scanDisplayAds(root, snapshot.url)) displayAds.add(element);
+    }
+    // Finish every video scan first: hiding one root must not suppress a candidate
+    // in another root, or hide main-video metadata inspected by the detector.
+    for (const element of displayAds) {
+      if (!element.isConnected) continue;
+      element.setAttribute(HIDDEN_ATTRIBUTE, "");
+      hiddenAds.add(element);
     }
     if (snapshot.pending.size) scheduleFlush();
   }
 
+  function resourceLoaded(event) {
+    const element = event.target;
+    if (element?.nodeType !== 1 || !element.matches("img, iframe")) return;
+    if (routeChanged() || stopped || !page?.supported) return;
+    const scope = element.closest(`${detector.CARD_SELECTOR},[${HIDDEN_ATTRIBUTE}]`);
+    if (scope) scheduleScan(scope);
+  }
+
   const observer = new MutationObserver(records => {
-    if (stopped || routeChanged() || !page?.supported) return;
+    if (routeChanged() || stopped || !page?.supported) return;
+    releaseDetachedAds();
     for (const record of records) {
       const element = record.target.nodeType === 1 ? record.target : record.target.parentElement;
       if (!element) continue;
-      const scope = element.closest(`${detector.CARD_SELECTOR},${detector.MAIN_METADATA}`);
+      const scope = element.closest(`${detector.CARD_SELECTOR},${detector.MAIN_METADATA},[${HIDDEN_ATTRIBUTE}]`);
       if (scope) scheduleScan(scope);
       else if (record.type === "childList") {
         for (const node of record.addedNodes) if (node.nodeType === 1) scheduleScan(node);
@@ -140,15 +183,19 @@
     subtree: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ["class", "style", "hidden", "aria-hidden", "href", "data-target-url", "content"],
+    // Our hiding attribute is deliberately excluded to avoid observing our own writes.
+    attributeFilter: ["id", "class", "style", "hidden", "aria-hidden", "href", "data-target-url", "content", "src", "srcset"],
   });
+  // Image completion changes naturalWidth without a DOM mutation. Capture load
+  // because resource load events do not bubble to the document.
+  document.addEventListener("load", resourceLoaded, true);
   routeChanged();
-  routeTimer = setInterval(routeChanged, 1000);
+  if (!stopped) routeTimer = setInterval(routeChanged, 1000);
   window.addEventListener("popstate", routeChanged);
   window.addEventListener("hashchange", routeChanged);
   window.addEventListener("pagehide", event => { if (!event.persisted) stop(); });
   window.addEventListener("pageshow", event => {
-    if (routeChanged()) return;
+    if (routeChanged() || stopped) return;
     if (event.persisted && page) { resynchronize(page); scheduleFlush(0); }
     scheduleScan(document, 100);
   });

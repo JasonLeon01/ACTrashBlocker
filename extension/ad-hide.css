@@ -1,0 +1,4 @@
+/* Only confirmed display-ad containers receive this content-script-owned marker. */
+[data-actrashblocker-hidden] {
+  display: none !important;
+}

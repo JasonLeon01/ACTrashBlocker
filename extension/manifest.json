@@ -34,6 +34,7 @@
     {
       "matches": ["https://www.bilibili.com/*"],
       "js": ["site-api.js", "detector.js", "content.js"],
+      "css": ["ad-hide.css"],
       "run_at": "document_idle",
       "all_frames": false
     }

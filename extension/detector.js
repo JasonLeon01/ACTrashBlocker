@@ -9,6 +9,7 @@
     ".ad-report", ".ad-floor-cover", ".strip-ad", "#slide_ad",
   ].join(",");
   const NON_LAYOUT_CARD_SELECTOR = CARD_SELECTOR.split(",").filter(selector => selector !== ".card-box").join(",");
+  const DISPLAY_SLOT_SELECTOR = ".video-page-game-card-small, #slide_ad, .ad-report, .ad-floor-cover, .strip-ad";
   const MARKERS = [
     [".bili-video-card__info--creative-ad", "小火箭推广标记"],
     [".bili-video-card__info--ad", "广告标记"],
@@ -141,7 +142,7 @@
     return video;
   }
 
-  function extractVideo(card, base) {
+  function destinationNodes(card, base) {
     const scoped = matchesIncludingRoot(card, "a[href], [data-target-url]")
       .filter(node => belongsTo(card, node) && visible(node));
     const explicitTargets = scoped.filter(node => node.hasAttribute("data-target-url"));
@@ -164,7 +165,12 @@
         return !(url?.hostname === "space.bilibili.com" && /^\/[1-9]\d*\/?$/u.test(url.pathname));
       });
     }
+    return targets;
+  }
+
+  function extractVideo(card, base) {
     const choices = new Map();
+    const targets = destinationNodes(card, base);
     for (const node of targets) {
       const video = targetVideo(node, base);
       if (!video) return null;
@@ -178,6 +184,76 @@
     const heading = card.querySelector(".bili-video-card__info--tit, .title, h3, h4");
     if (heading && belongsTo(card, heading) && visible(heading)) video.title = text(heading.getAttribute("title") || heading.textContent) || video.title;
     return video;
+  }
+
+  function placeholder(raw) {
+    return typeof raw !== "string" || !raw.trim() || /^[?#]/u.test(raw.trim()) || /^(?:\.\.?\/?)$/u.test(raw.trim());
+  }
+
+  function containsVideoDestination(raw, base, depth = 0) {
+    if (depth > 3) return false;
+    if (videoFromURL(raw, base)) return true;
+    const url = toURL(raw, base);
+    return url?.hostname === "cm.bilibili.com" && TARGET_PARAMS.some(param =>
+      url.searchParams.getAll(param).some(value => containsVideoDestination(value, base, depth + 1)));
+  }
+
+  function nonVideoDestination(raw, base, depth = 0) {
+    if (depth > 3 || placeholder(raw)) return false;
+    const url = toURL(raw, base);
+    if (!url || videoFromURL(raw, base)) return false;
+    if (url.hostname === "cm.bilibili.com") {
+      const destinations = TARGET_PARAMS.flatMap(param => url.searchParams.getAll(param));
+      return destinations.length > 0 && destinations.every(value => nonVideoDestination(value, base, depth + 1));
+    }
+    // Short links and other Bilibili content routes may still lead to a video.
+    // Only known landing-page routes/hosts are conclusive on Bilibili itself.
+    if (["b23.tv", "bili2233.cn"].some(host => url.hostname === host || url.hostname.endsWith(`.${host}`))) return false;
+    if (VIDEO_HOSTS.has(url.hostname)) return /^\/(?:blackboard|activity)(?:\/|$)/u.test(url.pathname);
+    if (url.hostname.endsWith(".bilibili.com")) return ["game.bilibili.com", "mall.bilibili.com", "show.bilibili.com"].includes(url.hostname);
+    return true;
+  }
+
+  function displayTarget(node, base) {
+    const href = node.getAttribute("href");
+    if (!node.hasAttribute("data-target-url")) return nonVideoDestination(href, base);
+    if (!nonVideoDestination(node.getAttribute("data-target-url"), base)) return false;
+    const url = toURL(href, base);
+    // A data target may be paired with a placeholder or an opaque tracking URL.
+    if (!url || placeholder(href) || (url.hostname === "cm.bilibili.com" && !cmDestinationParameters(node, base))) return true;
+    return nonVideoDestination(href, base);
+  }
+
+  function displayAd(card, base) {
+    // Do not collapse a shared wrapper containing independent cards or a player.
+    const players = "video, audio, #bilibili-player, #bilibiliPlayer, .bpx-player-container";
+    if (card.closest(players) || card.querySelector(players)) return false;
+    if (matchesIncludingRoot(card, "iframe").some(frame => !nonVideoDestination(frame.getAttribute("src"), base))) return false;
+    if ([...card.querySelectorAll(CARD_SELECTOR)].some(nested => !belongsTo(card, nested))) return false;
+    const links = matchesIncludingRoot(card, "a[href], [data-target-url]").filter(visible);
+    if (links.some(node => [node.getAttribute("href"), node.getAttribute("data-target-url")]
+      .some(value => containsVideoDestination(value, base)))) return false;
+    const targets = destinationNodes(card, base);
+    if (targets.length) return targets.every(node => displayTarget(node, base));
+    // A missing/placeholder destination is not evidence of a pure advertisement.
+    if (links.length || !card.matches(DISPLAY_SLOT_SELECTOR)) return false;
+    return matchesIncludingRoot(card, "*").some(node => {
+      if (!visible(node)) return false;
+      if (node.matches("img")) return node.complete && node.naturalWidth > 0;
+      if (node.matches("iframe")) return nonVideoDestination(node.getAttribute("src"), base);
+      return /url\(/iu.test(node.ownerDocument.defaultView.getComputedStyle(node).backgroundImage);
+    });
+  }
+
+  function displayContainer(card) {
+    // Homepage cards occupy a grid cell through these single-child layout shells.
+    // Collapse only a dedicated shell, never an ancestor with sibling content.
+    while (card.parentElement?.matches(".bili-feed-card, .feed-card")) {
+      const parent = card.parentElement;
+      if (parent.children.length !== 1 || [...parent.childNodes].some(node => node.nodeType === 3 && node.textContent.trim())) break;
+      card = parent;
+    }
+    return card;
   }
 
   function mainVideoCandidates(doc, base) {
@@ -209,14 +285,12 @@
     return [{ key: videoKey(current), video: { ...current, title: text(heading?.getAttribute("title") || heading?.textContent) }, evidence: [...evidence] }];
   }
 
-  function scan(root = document, base = root.ownerDocument?.URL || root.URL) {
-    if (!pageKey(base)) return [];
+  function markedCards(root, base) {
     // A late href update may be observed inside the standard small-card layout
     // shell, while its promotion class lives on the immediate parent card.
     if (root.nodeType === 1 && root.matches(".card-box") &&
       root.parentElement?.matches(".video-page-card-small, .video-card-ad-small") &&
       belongsTo(root.parentElement, root)) root = root.parentElement;
-    const doc = root.nodeType === 9 ? root : root.ownerDocument;
     const cards = new Map();
     const add = (marker, evidence) => {
       if (!visible(marker)) return;
@@ -237,6 +311,18 @@
         add(link, "B 站广告推广链接");
       }
     }
+    return cards;
+  }
+
+  function scanDisplayAds(root = document, base = root.ownerDocument?.URL || root.URL) {
+    if (!pageKey(base)) return [];
+    return [...new Set([...markedCards(root, base).keys()].filter(card => displayAd(card, base)).map(displayContainer))];
+  }
+
+  function scan(root = document, base = root.ownerDocument?.URL || root.URL) {
+    if (!pageKey(base)) return [];
+    const doc = root.nodeType === 9 ? root : root.ownerDocument;
+    const cards = markedCards(root, base);
     const result = [];
     for (const [card, marker] of cards) {
       const video = extractVideo(card, base);
@@ -251,5 +337,5 @@
     return result;
   }
 
-  globalThis.BiliPromoDetector = Object.freeze({ scan, pageKey, videoFromURL, videoKey, CARD_SELECTOR, MAIN_METADATA });
+  globalThis.BiliPromoDetector = Object.freeze({ scan, scanDisplayAds, pageKey, videoFromURL, videoKey, CARD_SELECTOR, MAIN_METADATA });
 })();
