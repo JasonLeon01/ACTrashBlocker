@@ -164,7 +164,7 @@ async function hello(message, sender) {
     const old = s.pages[context.tabId];
     if (old?.id === message.pageId && old.documentId === context.documentId) return;
     s.pages[context.tabId] = { id: message.pageId, url: context.url, route: context.route,
-      documentId: context.documentId, candidates: [], detections: {}, announcedUids: [],
+      documentId: context.documentId, hiddenAdCount: null, candidates: [], detections: {}, announcedUids: [],
       lastPopupAt: old?.lastPopupAt || 0, popupPending: false, popupDueAt: 0 };
   });
   await refreshBadge(context.tabId);
@@ -201,6 +201,19 @@ async function detected(message, sender) {
   await refreshBadge(context.tabId);
   await configureWatchdog();
   kick();
+  return { ok: true };
+}
+
+async function adStats(message, sender) {
+  const context = await contentContext(message, sender);
+  if (!context.route || !Number.isSafeInteger(message.hiddenAdCount) || message.hiddenAdCount < 0) {
+    throw new Error('无效的广告隐藏统计');
+  }
+  await update(s => {
+    const page = currentPage(s, context.tabId, message.pageId);
+    if (!page || page.documentId !== context.documentId) throw new ApiError('页面已更新，请重新同步', { code: 'PAGE_STALE' });
+    page.hiddenAdCount = message.hiddenAdCount;
+  });
   return { ok: true };
 }
 
@@ -471,6 +484,7 @@ async function getState(message) {
   const page = s.pages[message.tabId];
   return { ok: true, supported: Boolean(route), account: s.account, queue: queueSummary(s.queue),
     page: route && page?.route === route ? { id: page.id, url: page.url,
+      hiddenAdCount: Number.isSafeInteger(page.hiddenAdCount) && page.hiddenAdCount >= 0 ? page.hiddenAdCount : null,
       candidates: page.candidates.map(c => candidateView(c, s)) } : null };
 }
 
@@ -478,6 +492,7 @@ async function dispatch(message, sender) {
   if (!message || typeof message.type !== 'string') throw new Error('无效的请求');
   if (message.type === 'PAGE_HELLO') return hello(message, sender);
   if (message.type === 'DETECTED') return detected(message, sender);
+  if (message.type === 'AD_STATS') return adStats(message, sender);
   if (!isPopup(sender)) throw new Error('操作只能由插件弹窗发起');
   switch (message.type) {
     case 'GET_STATE': return getState(message);

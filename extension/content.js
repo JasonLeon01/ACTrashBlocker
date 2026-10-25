@@ -32,6 +32,17 @@
       element.removeAttribute(HIDDEN_ATTRIBUTE);
       hiddenAds.delete(element);
     }
+    updateAdCount();
+  }
+
+  function updateAdCount() {
+    if (stopped || !page?.supported || page.hiddenAdCount === hiddenAds.size) return;
+    page.hiddenAdCount = hiddenAds.size;
+    scheduleFlush();
+  }
+
+  function needsAdStats(snapshot) {
+    return Boolean(snapshot?.supported && snapshot.hiddenAdCount !== snapshot.sentHiddenAdCount);
   }
 
   function stop() {
@@ -53,6 +64,7 @@
   function resynchronize(snapshot) {
     snapshot.hello = false;
     snapshot.sent.clear();
+    snapshot.sentHiddenAdCount = null;
     for (const [key, item] of snapshot.known) snapshot.pending.set(key, item);
   }
 
@@ -66,6 +78,15 @@
         if (!reply?.ok) throw new Error(reply?.error || "后台尚未就绪");
         if (snapshot !== page) return;
         snapshot.hello = true;
+      }
+      if (needsAdStats(snapshot)) {
+        const hiddenAdCount = snapshot.hiddenAdCount;
+        const reply = await chrome.runtime.sendMessage({ type: "AD_STATS", pageId: snapshot.id, url: snapshot.url, hiddenAdCount });
+        if (reply?.code === "PAGE_STALE") resynchronize(snapshot);
+        if (!reply?.ok) throw new Error(reply?.error || "广告拦截数量同步失败");
+        if (snapshot !== page) return;
+        // A scan can change the count while this message is in flight.
+        snapshot.sentHiddenAdCount = hiddenAdCount;
       }
       if (snapshot.pending.size) {
         const batch = [...snapshot.pending.values()].slice(0, MAX_BATCH);
@@ -86,7 +107,7 @@
       retryDelay = Math.min(retryDelay * 2, 30000);
     } finally {
       sending = false;
-      if (!stopped && (page !== snapshot || (!flushTimer && page?.pending.size))) scheduleFlush();
+      if (!stopped && (page !== snapshot || (!flushTimer && (page?.pending.size || needsAdStats(page))))) scheduleFlush();
     }
   }
 
@@ -103,6 +124,8 @@
       url: location.href,
       supported: Boolean(key),
       hello: false,
+      hiddenAdCount: 0,
+      sentHiddenAdCount: null,
       sent: new Map(),
       pending: new Map(),
       known: new Map(),
@@ -153,6 +176,7 @@
       element.setAttribute(HIDDEN_ATTRIBUTE, "");
       hiddenAds.add(element);
     }
+    updateAdCount();
     if (snapshot.pending.size) scheduleFlush();
   }
 

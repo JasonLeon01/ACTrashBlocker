@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 const elements = Object.fromEntries([
   'count-badge', 'account', 'account-text', 'login-link', 'refresh-account',
+  'ad-summary', 'ad-summary-text',
   'notice', 'notice-text', 'dismiss-notice', 'queue', 'queue-title', 'queue-count',
   'queue-progress', 'queue-detail', 'queue-actions', 'resume-queue', 'cancel-queue',
   'main', 'empty-state', 'empty-title', 'empty-description', 'list-heading',
@@ -9,6 +10,7 @@ const elements = Object.fromEntries([
 
 let tabId = null;
 let state = null;
+let stateConnected = false;
 let refreshing = false;
 let actionPending = false;
 let accountPending = false;
@@ -112,6 +114,13 @@ function renderAccount() {
   elements['account-text'].title = elements['account-text'].textContent;
 }
 
+function renderAdSummary() {
+  const count = state?.page?.hiddenAdCount;
+  const available = stateConnected && state?.supported && Number.isSafeInteger(count) && count >= 0;
+  elements['ad-summary'].hidden = !available;
+  elements['ad-summary-text'].textContent = available ? `当前页面已拦截 ${count} 个广告` : '';
+}
+
 function renderQueue() {
   const queue = state?.queue;
   elements.queue.hidden = !queue || !(queue.total > 0);
@@ -193,10 +202,11 @@ function renderCandidate(candidate) {
 }
 
 function render() {
-  const signature = JSON.stringify([state, actionPending, accountPending]);
+  const signature = JSON.stringify([state, stateConnected, actionPending, accountPending]);
   if (signature === renderSignature) return;
   renderSignature = signature;
   renderAccount();
+  renderAdSummary();
   renderQueue();
   const candidates = state?.supported ? state.page?.candidates ?? [] : [];
   const eligible = eligibleCandidates();
@@ -252,9 +262,12 @@ async function refreshState() {
       currentPageId = nextPageId;
     }
     state = next;
+    stateConnected = true;
     render();
   } catch (error) {
     if (!disposed) {
+      stateConnected = false;
+      render();
       showNotice(text(error.message, '无法连接插件后台，请重新打开弹窗。'), 'error');
       elements.main.setAttribute('aria-busy', 'false');
       if (!state) {
